@@ -87,3 +87,33 @@ def fetch_aggregated(fields_mean, fields_last, start_utc_iso: str, end_utc_iso: 
         df["time_utc"] = pd.to_datetime(df["time"], unit="ms", utc=True)
 
     return df
+def fetch_fields(fields: list[str], start_utc_iso: str, end_utc_iso: str, limit: int | None = None) -> pd.DataFrame:
+    """
+    Lecture 'raw' (non-agrégée) des champs demandés sur une fenêtre temporelle.
+    Compatible avec la page 1 (import fetch_fields).
+    """
+    if not fields:
+        return pd.DataFrame()
+
+    select = ", ".join([f"\"{f}\"" for f in fields])
+
+    # Measurement = même nom que la DB (comme dans tes requêtes existantes)
+    # Si tu veux rendre générique : meas = get_setting("EXOCET_DB")
+    meas = "C54"
+
+    q = (
+        f"SELECT {select} FROM \"{meas}\" "
+        f"WHERE time >= '{start_utc_iso}' AND time < '{end_utc_iso}'"
+    )
+    if limit is not None:
+        q += f" LIMIT {int(limit)}"
+
+    data = run_influxql(q)
+    df = parse_series_to_df(data)
+    if df.empty:
+        return df
+
+    if "time" in df.columns:
+        df["time_utc"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+
+    return df
