@@ -1,21 +1,26 @@
 import os
-import streamlit as st
 
-def get_setting(key: str, default: str | None = None) -> str:
+def get_setting(key: str) -> str:
     """
-    Priority:
-    1) st.secrets (Streamlit local secrets.toml or Cloud Secrets)
-    2) OS environment variables
-    3) default (if provided)
+    Récupère une variable de config :
+    - Streamlit Cloud: st.secrets[key]
+    - Local: variables d'environnement (chargées via .env si python-dotenv est utilisé)
     """
-    if key in st.secrets:
-        return str(st.secrets[key])
 
-    env_val = os.getenv(key)
-    if env_val is not None and env_val != "":
-        return str(env_val)
+    # 1) Streamlit secrets (si streamlit dispo et secrets configurés)
+    try:
+        import streamlit as st  # import local pour éviter dépendance dure au runtime
+        if hasattr(st, "secrets") and key in st.secrets:
+            val = st.secrets[key]
+            if val is None or str(val).strip() == "":
+                raise KeyError(f"Empty setting in st.secrets: {key}")
+            return str(val)
+    except Exception:
+        # streamlit pas dispo ou secrets non accessibles -> on continue
+        pass
 
-    if default is not None:
-        return str(default)
-
-    raise KeyError(f"Missing setting: {key}")
+    # 2) Environnement OS
+    val = os.getenv(key)
+    if val is None or val.strip() == "":
+        raise KeyError(f"Missing setting: {key}")
+    return val
