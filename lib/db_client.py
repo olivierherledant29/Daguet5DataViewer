@@ -1,91 +1,89 @@
 import requests
 import pandas as pd
+
 from .config import get_setting
 
-# Influx measurement (d'après tes tests)
-MEASUREMENT = '"C54"'
-
+def _query_url() -> str:
+    """
+    Supporte 2 modes de config :
+    - EXOCET_GRAFANA_URL = URL complète finissant par /query
+      ex: https://exocet.cloud/grafana/api/datasources/proxy/uid/<UID>/query
+    - OU bien EXOCET_GRAFANA_URL = base url (https://exocet.cloud)
+      + EXOCET_GRAFANA_DS_UID = <UID>
+      => on reconstruit l'URL /grafana/api/datasources/proxy/uid/<UID>/query
+    """
+    url = get_setting("EXOCET_GRAFANA_URL").rstrip("/")
+    if url.endswith("/query"):
+        return url
+    ds_uid = get_setting("EXOCET_GRAFANA_DS_UID")
+    return f"{url}/grafana/api/datasources/proxy/uid/{ds_uid}/query"
 
 def run_influxql(query: str) -> dict:
-    url = get_setting("EXOCET_GRAFANA_URL")
-    token = get_setting("EXOCET_BEARER_TOKEN")
-    db = get_setting("EXOCET_DB", "C54")
+    url = _query_url()
+    token = get_setting("EXOCET_GRAFANA_TOKEN")  # récupère aussi EXOCET_BEARER_TOKEN via aliases
+    db = get_setting("EXOCET_DB")
 
     headers = {"Authorization": f"Bearer {token}"}
-    params = {"db": db, "epoch": "ms", "precision": "ms", "q": query}
-    r = requests.get(url, headers=headers, params=params, timeout=120)
-    if not r.ok:
-        raise RuntimeError(f"HTTP {r.status_code} on {r.url}\n{r.text[:500]}")
+    params = {
+        "db": db,
+        "epoch": "ms",
+        "precision": "ms",
+        "q": query,
+    }
+
+    r = requests.get(url, headers=headers, params=params, timeout=60)
+    r.raise_for_status()
     return r.json()
 
-
-def series_to_df(resp_json: dict) -> pd.DataFrame:
-    results = resp_json.get("results", [])
+def parse_series_to_df(data: dict) -> pd.DataFrame:
+    """
+    Parse InfluxQL JSON -> DataFrame.
+    Attend data['results'][0]['series'][0]['columns'/'values'].
+    """
+    results = data.get("results", [])
     if not results:
         return pd.DataFrame()
-    series = results[0].get("series", [])
+    series = results[0].get("series")
     if not series:
         return pd.DataFrame()
-    s = series[0]
-    df = pd.DataFrame(s.get("values", []), columns=s.get("columns", []))
-    if "time" in df.columns:
-        df["time_utc"] = pd.to_datetime(df["time"], unit="ms", utc=True)
-    return df
 
+    rows = []
+    for s in series:
+        cols = s.get("columns", [])
+        vals = s.get("values", [])
+        if cols and vals:
+            rows.append(pd.DataFrame(vals, columns=cols))
 
-def _q_ident(name: str) -> str:
-    # safe quoting for field names containing dots
-    return '"' + name.replace('"', '\\"') + '"'
-
-
-def fetch_fields(fields: list[str], start_utc_iso: str, end_utc_iso: str) -> pd.DataFrame:
-    """
-    Fetch multiple fields in one InfluxQL query (raw, no aggregation).
-    Returns: time, <fields...>, time_utc
-    """
-    if not fields:
+    if not rows:
         return pd.DataFrame()
+    return pd.concat(rows, ignore_index=True)
 
-    select = ", ".join(_q_ident(f) for f in fields)
-    query = (
-        f"SELECT {select} FROM {MEASUREMENT} "
-        f"WHERE time >= '{start_utc_iso}' AND time < '{end_utc_iso}'"
-    )
-
-    data = run_influxql(query)
-    return series_to_df(data)
-
-
-def fetch_aggregated(
-    fields_mean: list[str],
-    fields_last: list[str],
-    start_utc_iso: str,
-    end_utc_iso: str,
-    bucket: str = "10s",
-) -> pd.DataFrame:
+def fetch_aggregated(fields_mean, fields_last, start_utc_iso: str, end_utc_iso: str, bucket: str = "10s") -> pd.DataFrame:
     """
-    Fetch aggregated data:
-      - mean() for numeric fields
-      - last() for categorical/string fields
-    All outputs are aliased back to the original field names.
+    fields_mean : champs numériques -> mean()
+    fields_last : champs string/int codes -> last()
+    bucket      : ex '10s'
     """
     parts = []
     for f in fields_mean:
-        qi = _q_ident(f)
-        parts.append(f"mean({qi}) AS {qi}")
+        parts.append(f'mean("{f}") AS "{f}"')
     for f in fields_last:
-        qi = _q_ident(f)
-        parts.append(f"last({qi}) AS {qi}")
-
-    if not parts:
-        return pd.DataFrame()
+        parts.append(f'last("{f}") AS "{f}"')
 
     select = ", ".join(parts)
-    query = (
-        f"SELECT {select} FROM {MEASUREMENT} "
+    q = (
+        f"SELECT {select} FROM \"C54\" "
         f"WHERE time >= '{start_utc_iso}' AND time < '{end_utc_iso}' "
         f"GROUP BY time({bucket}) fill(null)"
     )
 
-    data = run_influxql(query)
-    return series_to_df(data)
+    data = run_influxql(q)
+    df = parse_series_to_df(data)
+    if df.empty:
+        return df
+
+    # time en ms -> datetime UTC
+    if "time" in df.columns:
+        df["time_utc"] = pd.to_datetime(df["time"], unit="ms", utc=True)
+
+    return df

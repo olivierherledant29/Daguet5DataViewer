@@ -2,11 +2,31 @@ import os
 
 # Aliases: si ton code demande EXOCET_*, on accepte aussi d'autres clés possibles
 ALIASES = {
-    "EXOCET_GRAFANA_URL": ["EXOCET_GRAFANA_URL", "GRAFANA_BASE_URL", "GRAFANA_URL", "EXOCET_CLOUD_URL"],
-    "EXOCET_GRAFANA_DS_UID": ["EXOCET_GRAFANA_DS_UID", "GRAFANA_DS_UID", "DATASOURCE_UID"],
-    "EXOCET_DB": ["EXOCET_DB", "INFLUX_DB", "DB"],
-    "EXOCET_GRAFANA_TOKEN": ["EXOCET_GRAFANA_TOKEN", "GRAFANA_TOKEN", "TOKEN"],
+    "EXOCET_GRAFANA_URL": [
+        "EXOCET_GRAFANA_URL",
+        "GRAFANA_BASE_URL",
+        "GRAFANA_URL",
+        "EXOCET_CLOUD_URL",
+    ],
+    "EXOCET_GRAFANA_DS_UID": [
+        "EXOCET_GRAFANA_DS_UID",
+        "GRAFANA_DS_UID",
+        "DATASOURCE_UID",
+    ],
+    "EXOCET_DB": [
+        "EXOCET_DB",
+        "INFLUX_DB",
+        "DB",
+    ],
+    # IMPORTANT: on supporte aussi EXOCET_BEARER_TOKEN (ton naming local)
+    "EXOCET_GRAFANA_TOKEN": [
+        "EXOCET_GRAFANA_TOKEN",
+        "EXOCET_BEARER_TOKEN",
+        "GRAFANA_TOKEN",
+        "TOKEN",
+    ],
 }
+
 
 def _get_from_streamlit_secrets(key: str):
     try:
