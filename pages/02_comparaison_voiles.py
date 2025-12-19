@@ -387,11 +387,11 @@ def plot_by_sail(df, color):
         # Points pleins
         ax3.scatter(
             th, bsp,
-            s=SCATTER_S,
+            s=12,
             marker=marker,
             facecolors=color,
-            edgecolors=color,
-            linewidths=0.0,
+            edgecolors="black",
+            linewidths=0.2,
             alpha=SCATTER_ALPHA,
         )
         used.append(int(code))
