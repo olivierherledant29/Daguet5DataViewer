@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .arc { fill: none; stroke: #1F7A5A; stroke-width: 16; stroke-linecap: round; }
+    </style>
+  </defs>
+
+  <!-- 5 demi-cercles à droite (comme 5 "D" ouverts à gauche) -->
+  <!-- Chaque path part du point haut (x=256, y=256-R) et arrive au point bas (x=256, y=256+R)
+       avec un arc "large-arc" qui passe par la droite -->
+  <path class="arc" d="M256 86  A170 170 0 0 1 256 426" />
+  <path class="arc" d="M256 111 A145 145 0 0 1 256 401" />
+  <path class="arc" d="M256 136 A120 120 0 0 1 256 376" />
+  <path class="arc" d="M256 161 A95  95  0 0 1 256 351" />
+  <path class="arc" d="M256 186 A70  70  0 0 1 256 326" />
+</svg>
+
+
