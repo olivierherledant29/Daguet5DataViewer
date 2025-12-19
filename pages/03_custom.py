@@ -33,18 +33,17 @@ def ensure_nav_days() -> list[pd.Timestamp]:
     nav_days = st.session_state.get("nav_days", [])
     return sorted(nav_days, reverse=True)
 
-def build_bins_2knots_with_optional_first_1(lo_int: int, hi_int_exclusive: int):
+def build_bins_2units_with_optional_first_1(lo_int: int, hi_int_exclusive: int) -> list[tuple[float, float]]:
     """
-    Construit des bins sur [lo_int, hi_int_exclusive) en pas 2.
-    Si la largeur totale n'est pas multiple de 2, la première bin fait 1.
-    Exemple: lo=5, hi=12 => largeur=7 (impair) => [5,6) puis [6,8) [8,10) [10,12)
+    Bins sur [lo_int, hi_int_exclusive) en pas 2.
+    Si la largeur totale n'est pas multiple de 2, première bin de 1.
     """
     width = hi_int_exclusive - lo_int
+    if width <= 0:
+        return []
+
     bins = []
     cur = float(lo_int)
-
-    if width <= 0:
-        return bins
 
     if width % 2 == 1:
         bins.append((cur, cur + 1.0))
@@ -57,10 +56,23 @@ def build_bins_2knots_with_optional_first_1(lo_int: int, hi_int_exclusive: int):
 
     return bins
 
+def build_abs_twa_bins_10deg() -> list[tuple[float, float]]:
+    """
+    Demande: commencer à 40° (35-45), puis 10° en 10° jusqu'à 160°.
+    Donc: [35,45), [45,55), ..., [155,165)
+    """
+    edges = list(range(35, 166, 10))  # 35,45,...,165
+    return [(float(edges[i]), float(edges[i+1])) for i in range(len(edges) - 1)]
+
+def fmt_range(lo: float, hi: float, unit: str) -> str:
+    if unit in ("nds", "deg"):
+        return f"{int(lo)} à {int(hi)} {unit}"
+    return f"{lo} à {hi}"
+
 # --------------------
-# Constantes plot
+# Plot settings
 # --------------------
-SCATTER_S = 6
+SCATTER_S = 10
 SCATTER_ALPHA = 0.4
 
 # --------------------
@@ -81,7 +93,7 @@ FIELDS_LAST = []
 # --------------------
 nav_days = ensure_nav_days()
 if not nav_days:
-    st.warning("Librairie des jours navigués indisponible.")
+    st.warning("Librairie des jours navigués indisponible. Ouvre d’abord la page d’accueil.")
     st.stop()
 
 nav_labels = [format_date_fr(d) for d in nav_days]
@@ -96,6 +108,7 @@ days_labels = st.multiselect(
     "Journées — coche au moins 1",
     options=nav_labels,
     default=default_days,
+    key="custom_days_v3",
 )
 
 load_clicked = st.button("Sélectionner journées", type="primary")
@@ -122,40 +135,34 @@ if load_clicked:
         st.error("Sélectionne au moins une journée.")
     else:
         with st.spinner("Chargement des données (10 s)…"):
-            st.session_state["custom_df_raw"] = load_days_10s(days_labels)
-        st.session_state.pop("custom_df_f", None)
+            st.session_state["custom_df_raw_v3"] = load_days_10s(days_labels)
+        st.session_state.pop("custom_df_f_v3", None)
         st.success("Données chargées.")
 
-df_raw = st.session_state.get("custom_df_raw", pd.DataFrame())
+df_raw = st.session_state.get("custom_df_raw_v3", pd.DataFrame())
 
 # --------------------
-# Filtres + choix binning
+# Filtres + binning
 # --------------------
 st.subheader("Filtres")
 
 colF1, colF2, colF3, colF4, colF5 = st.columns([1, 1, 1, 1, 1.2])
 with colF1:
-    twa_min, twa_max = st.slider("abs(TWA) — degrés", 0, 180, (0, 180))
+    twa_min, twa_max = st.slider("abs(TWA) — degrés", 0, 180, (0, 180), step=1, key="custom_twa_v3")
 with colF2:
-    bsp_min, bsp_max = st.slider("BSP — nds", 0, 30, (0, 30))
+    bsp_min, bsp_max = st.slider("BSP — nds", 0, 30, (0, 30), step=1, key="custom_bsp_v3")
 with colF3:
-    tws_min, tws_max = st.slider("TWS — nds", 0, 40, (0, 40))
+    tws_min, tws_max = st.slider("TWS — nds", 0, 40, (0, 40), step=1, key="custom_tws_v3")
 with colF4:
-    pr_min, pr_max = st.slider("BSP_polarRatio", 0, 160, (70, 130))
+    pr_min, pr_max = st.slider("BSP_polarRatio", 0, 160, (70, 130), step=1, key="custom_pr_v3")
 with colF5:
-    bin_mode = st.radio(
-        "Bins",
-        options=["BSP", "TWS"],
-        horizontal=True,
-        index=0,
-    )
+    bin_mode = st.radio("Bin", options=["TWS", "BSP", "abs(TWA)"], horizontal=True, index=0, key="custom_bin_mode_v3")
 
-apply_filters = st.button("Appliquer filtres")
+apply_filters = st.button("Appliquer filtres", key="custom_apply_v3")
 
 def apply_common_filters(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-
     out = df.dropna().copy()
     out["abs_twa"] = out["SilverData.WIND_TWA"].abs()
     out["abs_heel"] = out["SilverData.AHRS_Heel"].abs()
@@ -168,9 +175,9 @@ def apply_common_filters(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
 if apply_filters:
-    st.session_state["custom_df_f"] = apply_common_filters(df_raw)
+    st.session_state["custom_df_f_v3"] = apply_common_filters(df_raw)
 
-df_f = st.session_state.get("custom_df_f", pd.DataFrame())
+df_f = st.session_state.get("custom_df_f_v3", pd.DataFrame())
 
 # --------------------
 # Checks
@@ -184,97 +191,125 @@ if df_f.empty:
     st.stop()
 
 # --------------------
-# Bins (BSP ou TWS) sur data filtrées
+# Choix X / Y / Color (après bin)
 # --------------------
-if bin_mode == "BSP":
-    bin_col = "SilverData.BSP_BoatSpeed"
+# Note: Heel remplacé par abs(Heel)
+CHANNELS = {
+    "Trim": "SilverData.AHRS_Trim",
+    "abs(Heel)": "abs_heel",
+    "BSP": "SilverData.BSP_BoatSpeed",
+    "TWS": "SilverData.WIND_TWS",
+    "TWA": "SilverData.WIND_TWA",
+    "abs(TWA)": "abs_twa",
+    "BSP_polarRatio": "SilverData.PERF_BSP_PolarRatio",
+}
+
+if bin_mode == "TWS":
+    bin_key = "TWS"
+    bin_col = CHANNELS["TWS"]
     unit = "nds"
+    bins = build_bins_2units_with_optional_first_1(
+        int(float(df_f[bin_col].min())),
+        int(float(df_f[bin_col].max())) + 1
+    )
+elif bin_mode == "BSP":
+    bin_key = "BSP"
+    bin_col = CHANNELS["BSP"]
+    unit = "nds"
+    bins = build_bins_2units_with_optional_first_1(
+        int(float(df_f[bin_col].min())),
+        int(float(df_f[bin_col].max())) + 1
+    )
 else:
-    bin_col = "SilverData.WIND_TWS"
-    unit = "nds"
+    bin_key = "abs(TWA)"
+    bin_col = CHANNELS["abs(TWA)"]
+    unit = "deg"
+    bins = build_abs_twa_bins_10deg()
 
-lo_int = int(float(df_f[bin_col].min()))
-hi_int_excl = int(float(df_f[bin_col].max())) + 1  # demandé : int(max)+1
-
-bins = build_bins_2knots_with_optional_first_1(lo_int, hi_int_excl)
-
-# Conserve seulement les bins non vides
 bins_non_empty = []
 for lo, hi in bins:
-    sub = df_f[(df_f[bin_col] >= lo) & (df_f[bin_col] < hi)]
-    if not sub.empty:
+    if not df_f[(df_f[bin_col] >= lo) & (df_f[bin_col] < hi)].empty:
         bins_non_empty.append((lo, hi))
 
-# Échelle couleur globale : BSP_polarRatio
-pr_global_min = float(df_f["SilverData.PERF_BSP_PolarRatio"].min())
-pr_global_max = float(df_f["SilverData.PERF_BSP_PolarRatio"].max())
+if not bins_non_empty:
+    st.warning("Aucun bin non-vide avec les filtres actuels.")
+    st.stop()
 
-def plot_grid_one_cbar_per_row(title: str, y_col: str, y_label: str):
-    st.subheader(title)
+# Options X/Y/Color: enlever le channel utilisé pour bin
+options = [k for k in CHANNELS.keys() if k != bin_key]
 
-    cmap = plt.get_cmap()
-    norm = mpl.colors.Normalize(vmin=pr_global_min, vmax=pr_global_max)
+# Defaults : X=abs(TWA), Y=abs(Heel), Color=BSP_polarRatio (si possible)
+default_x = "abs(TWA)" if "abs(TWA)" in options else options[0]
+default_y = "abs(Heel)" if "abs(Heel)" in options else options[0]
+default_c = "BSP_polarRatio" if "BSP_polarRatio" in options else options[0]
 
-    # 2 plots par ligne
-    for i in range(0, len(bins_non_empty), 2):
-        row_bins = bins_non_empty[i:i+2]
-        col1, col2, colcb = st.columns([1, 1, 0.18])
-        plot_cols = [col1, col2]
+st.subheader("Scatter plot")
 
-        first = None
-        for j, (lo, hi) in enumerate(row_bins):
-            sub = df_f[(df_f[bin_col] >= lo) & (df_f[bin_col] < hi)]
-            if sub.empty:
-                continue
+colXYC1, colXYC2, colXYC3 = st.columns(3)
+with colXYC1:
+    x_key = st.selectbox("X", options=options, index=options.index(default_x), key="custom_x_v3")
+with colXYC2:
+    y_key = st.selectbox("Y", options=options, index=options.index(default_y), key="custom_y_v3")
+with colXYC3:
+    c_key = st.selectbox("Color", options=options, index=options.index(default_c), key="custom_c_v3")
 
-            fig = plt.figure()
-            sc = plt.scatter(
-                sub["abs_twa"],
-                sub[y_col],
-                s=SCATTER_S,
-                alpha=SCATTER_ALPHA,
-                c=sub["SilverData.PERF_BSP_PolarRatio"],
-                cmap=cmap,
-                norm=norm,
-            )
+x_col = CHANNELS[x_key]
+y_col = CHANNELS[y_key]
+c_col = CHANNELS[c_key]
 
-            plt.xlabel("abs(TWA) [deg]")
-            plt.ylabel(y_label)
-            # ex: "6 à 7 nds" ou "7 à 9 nds"
-            lo_i = int(lo) if float(lo).is_integer() else lo
-            hi_i = int(hi) if float(hi).is_integer() else hi
-            plt.title(f"{lo_i} à {hi_i} {unit}")
-            plt.tight_layout()
+# Échelle couleur globale (pour comparer entre bins)
+c_min = float(df_f[c_col].min())
+c_max = float(df_f[c_col].max())
+norm = mpl.colors.Normalize(vmin=c_min, vmax=c_max)
+cmap = plt.get_cmap()
 
-            plot_cols[j].pyplot(fig)
-            plt.close(fig)
-
-            if first is None:
-                first = sc
-
-        # Une seule colorbar pour la ligne
-        if first is not None:
-            fig_cb, ax_cb = plt.subplots(figsize=(1.0, 2.6))
-            fig_cb.colorbar(
-                mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
-                cax=ax_cb,
-                label="BSP_polarRatio",
-            )
-            fig_cb.tight_layout()
-            colcb.pyplot(fig_cb)
-            plt.close(fig_cb)
+st.caption(f"Binning: **{bin_mode}** — X: **{x_key}** — Y: **{y_key}** — Color: **{c_key}**")
 
 # --------------------
-# Plots
+# Plots (2 par ligne) + 1 colorbar par ligne
 # --------------------
-plot_grid_one_cbar_per_row(
-    title=f"Trim vs abs(TWA) — couleur = BSP_polarRatio (bins {bin_mode})",
-    y_col="SilverData.AHRS_Trim",
-    y_label="Trim",
-)
+for i in range(0, len(bins_non_empty), 2):
+    row_bins = bins_non_empty[i:i+2]
+    c1, c2, ccb = st.columns([1, 1, 0.18])
+    cols = [c1, c2]
+    have_any = False
 
-plot_grid_one_cbar_per_row(
-    title=f"abs(Heel) vs abs(TWA) — couleur = BSP_polarRatio (bins {bin_mode})",
-    y_col="abs_heel",
-    y_label="abs(Heel)",
-)
+    for j, (lo, hi) in enumerate(row_bins):
+        sub = df_f[(df_f[bin_col] >= lo) & (df_f[bin_col] < hi)]
+        if sub.empty:
+            continue
+
+        fig = plt.figure()
+        plt.scatter(
+            sub[x_col],
+            sub[y_col],
+            s=SCATTER_S,
+            alpha=SCATTER_ALPHA,
+            c=sub[c_col],
+            cmap=cmap,
+            norm=norm,
+        )
+        plt.xlabel(x_key)
+        plt.ylabel(y_key)
+        plt.title(fmt_range(lo, hi, unit))
+        plt.tight_layout()
+
+        cols[j].pyplot(fig)
+        plt.close(fig)
+        have_any = True
+
+    # Colorbar unique par ligne (si au moins un plot)
+    if have_any:
+        fig_cb, ax_cb = plt.subplots(figsize=(1.0, 2.6))
+        fig_cb.colorbar(
+            mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
+            cax=ax_cb,
+            label=c_key,
+        )
+        fig_cb.tight_layout()
+        ccb.pyplot(fig_cb)
+        plt.close(fig_cb)
+
+with st.expander("Aperçu données filtrées", expanded=False):
+    preview_cols = ["time_utc", "day_utc"] + [v for v in CHANNELS.values() if v in df_f.columns]
+    st.dataframe(df_f[preview_cols].head(500), width="stretch")
