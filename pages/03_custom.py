@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import pydeck as pdk
 
 from lib.db_client import fetch_aggregated
 
@@ -34,10 +35,6 @@ def ensure_nav_days() -> list[pd.Timestamp]:
     return sorted(nav_days, reverse=True)
 
 def build_bins_2units_with_optional_first_1(lo_int: int, hi_int_exclusive: int) -> list[tuple[float, float]]:
-    """
-    Bins sur [lo_int, hi_int_exclusive) en pas 2.
-    Si la largeur totale n'est pas multiple de 2, première bin de 1.
-    """
     width = hi_int_exclusive - lo_int
     if width <= 0:
         return []
@@ -57,12 +54,8 @@ def build_bins_2units_with_optional_first_1(lo_int: int, hi_int_exclusive: int) 
     return bins
 
 def build_abs_twa_bins_10deg() -> list[tuple[float, float]]:
-    """
-    Demande: commencer à 40° (35-45), puis 10° en 10° jusqu'à 160°.
-    Donc: [35,45), [45,55), ..., [155,165)
-    """
     edges = list(range(35, 166, 10))  # 35,45,...,165
-    return [(float(edges[i]), float(edges[i+1])) for i in range(len(edges) - 1)]
+    return [(float(edges[i]), float(edges[i + 1])) for i in range(len(edges) - 1)]
 
 def fmt_range(lo: float, hi: float, unit: str) -> str:
     if unit in ("nds", "deg"):
@@ -75,6 +68,14 @@ def fmt_range(lo: float, hi: float, unit: str) -> str:
 SCATTER_S = 10
 SCATTER_ALPHA = 0.4
 
+# Map point sizes (divisé par 2 vs précédent)
+MAP_RADIUS_BG_M = 4   # non retenus = noir
+MAP_RADIUS_FG_M = 5   # retenus = colorés
+
+# Map color scale (fixe)
+MAP_PR_MIN = 70.0
+MAP_PR_MAX = 130.0
+
 # --------------------
 # Channels à charger (10s)
 # --------------------
@@ -85,6 +86,11 @@ FIELDS_MEAN = [
     "SilverData.PERF_BSP_PolarRatio",
     "SilverData.AHRS_Heel",
     "SilverData.AHRS_Trim",
+    "SilverData.GPS_Latitude",
+    "SilverData.GPS_Longitude",
+    "SilverData.WIND_AWA",
+    "SilverData.WIND_AWS",
+    "SilverData.PERF_VMG",
 ]
 FIELDS_LAST = []
 
@@ -108,7 +114,7 @@ days_labels = st.multiselect(
     "Journées — coche au moins 1",
     options=nav_labels,
     default=default_days,
-    key="custom_days_v3",
+    key="custom_days_v5",
 )
 
 load_clicked = st.button("Sélectionner journées", type="primary")
@@ -135,34 +141,33 @@ if load_clicked:
         st.error("Sélectionne au moins une journée.")
     else:
         with st.spinner("Chargement des données (10 s)…"):
-            st.session_state["custom_df_raw_v3"] = load_days_10s(days_labels)
-        st.session_state.pop("custom_df_f_v3", None)
+            st.session_state["custom_df_raw_v5"] = load_days_10s(days_labels)
+        st.session_state.pop("custom_df_f_v5", None)
         st.success("Données chargées.")
 
-df_raw = st.session_state.get("custom_df_raw_v3", pd.DataFrame())
+df_raw = st.session_state.get("custom_df_raw_v5", pd.DataFrame())
+if df_raw.empty:
+    st.info("Sélectionne des journées puis clique sur **Sélectionner journées**.")
+    st.stop()
 
 # --------------------
-# Filtres + binning
+# Filtres + carte à droite
 # --------------------
 st.subheader("Filtres")
 
-colF1, colF2, colF3, colF4, colF5 = st.columns([1, 1, 1, 1, 1.2])
-with colF1:
-    twa_min, twa_max = st.slider("abs(TWA) — degrés", 0, 180, (0, 180), step=1, key="custom_twa_v3")
-with colF2:
-    bsp_min, bsp_max = st.slider("BSP — nds", 0, 30, (0, 30), step=1, key="custom_bsp_v3")
-with colF3:
-    tws_min, tws_max = st.slider("TWS — nds", 0, 40, (0, 40), step=1, key="custom_tws_v3")
-with colF4:
-    pr_min, pr_max = st.slider("BSP_polarRatio", 0, 160, (70, 130), step=1, key="custom_pr_v3")
-with colF5:
-    bin_mode = st.radio("Bin", options=["TWS", "BSP", "abs(TWA)"], horizontal=True, index=0, key="custom_bin_mode_v3")
+left, right = st.columns([1.0, 1.35], vertical_alignment="top")
 
-apply_filters = st.button("Appliquer filtres", key="custom_apply_v3")
+with left:
+    twa_min, twa_max = st.slider("abs(TWA) — degrés", 0, 180, (0, 180), step=1, key="custom_twa_v5")
+    bsp_min, bsp_max = st.slider("BSP — nds", 0, 30, (0, 30), step=1, key="custom_bsp_v5")
+    tws_min, tws_max = st.slider("TWS — nds", 0, 40, (0, 40), step=1, key="custom_tws_v5")
+    pr_min, pr_max = st.slider("BSP_polarRatio", 0, 160, (70, 130), step=1, key="custom_pr_v5")
+
+    bin_mode = st.radio("Bin", options=["TWS", "BSP", "abs(TWA)"], horizontal=True, index=0, key="custom_bin_mode_v5")
+
+    apply_filters = st.button("Appliquer filtres", key="custom_apply_v5")
 
 def apply_common_filters(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
     out = df.dropna().copy()
     out["abs_twa"] = out["SilverData.WIND_TWA"].abs()
     out["abs_heel"] = out["SilverData.AHRS_Heel"].abs()
@@ -174,26 +179,123 @@ def apply_common_filters(df: pd.DataFrame) -> pd.DataFrame:
         (out["SilverData.PERF_BSP_PolarRatio"] >= pr_min) & (out["SilverData.PERF_BSP_PolarRatio"] <= pr_max)
     ]
 
-if apply_filters:
-    st.session_state["custom_df_f_v3"] = apply_common_filters(df_raw)
+if apply_filters or ("custom_df_f_v5" not in st.session_state):
+    st.session_state["custom_df_f_v5"] = apply_common_filters(df_raw)
 
-df_f = st.session_state.get("custom_df_f_v3", pd.DataFrame())
-
-# --------------------
-# Checks
-# --------------------
-if df_raw.empty:
-    st.info("Sélectionne des journées puis clique sur **Sélectionner journées**.")
-    st.stop()
-
+df_f = st.session_state.get("custom_df_f_v5", pd.DataFrame())
 if df_f.empty:
     st.warning("Aucun point après filtrage.")
     st.stop()
 
 # --------------------
+# Carte GPS + colorbar à droite
+# --------------------
+def pr_to_rgba_clamped(pr: float, alpha: int, cmap) -> list[int]:
+    """
+    Map pr sur [70..130] avec clamp.
+    """
+    if pr is None or (isinstance(pr, float) and np.isnan(pr)):
+        pr = MAP_PR_MIN
+
+    pr_c = float(np.clip(pr, MAP_PR_MIN, MAP_PR_MAX))
+    t = (pr_c - MAP_PR_MIN) / (MAP_PR_MAX - MAP_PR_MIN)  # 0..1
+    r, g, b, _ = cmap(t)
+    return [int(255 * r), int(255 * g), int(255 * b), alpha]
+
+def build_map_frames(df_all: pd.DataFrame, df_filtered: pd.DataFrame):
+    lat_col = "SilverData.GPS_Latitude"
+    lon_col = "SilverData.GPS_Longitude"
+    pr_col = "SilverData.PERF_BSP_PolarRatio"
+
+    all_map = df_all.dropna(subset=["time_utc", lat_col, lon_col, pr_col]).copy()
+    fil_map = df_filtered.dropna(subset=["time_utc", lat_col, lon_col, pr_col]).copy()
+
+    # non retenues par filtres = all - filtered (par time_utc en ns)
+    fil_times = set(fil_map["time_utc"].astype("int64"))
+    all_map["_t"] = all_map["time_utc"].astype("int64")
+    bg_map = all_map[~all_map["_t"].isin(fil_times)].copy()
+
+    # standardize
+    fil_map = fil_map.rename(columns={lat_col: "lat", lon_col: "lon", pr_col: "pr"})
+    bg_map = bg_map.rename(columns={lat_col: "lat", lon_col: "lon", pr_col: "pr"})
+
+    return bg_map, fil_map
+
+bg_map, fil_map = build_map_frames(df_raw, df_f)
+
+with right:
+    st.markdown("**Cartographie GPS**")
+
+    map_col, cbar_col = st.columns([1.0, 0.12], vertical_alignment="top")
+
+    with map_col:
+        if fil_map.empty and bg_map.empty:
+            st.info("Pas de points GPS disponibles sur la sélection.")
+        else:
+            ref = fil_map if not fil_map.empty else bg_map
+            center_lat = float(ref["lat"].mean())
+            center_lon = float(ref["lon"].mean())
+            view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=11, pitch=0)
+
+            cmap = plt.get_cmap()  # colormap matplotlib par défaut
+
+            # BG: non retenus = noir
+            if not bg_map.empty:
+                bg_map = bg_map.copy()
+                bg_map["color"] = bg_map["pr"].apply(lambda _: [0, 0, 0, 60])
+            else:
+                bg_map = pd.DataFrame(columns=["lat", "lon", "pr", "color"])
+
+            # FG: retenus = colorés (pr clamped à [70..130])
+            if not fil_map.empty:
+                fil_map = fil_map.copy()
+                fil_map["color"] = fil_map["pr"].apply(lambda v: pr_to_rgba_clamped(float(v), alpha=200, cmap=cmap))
+            else:
+                fil_map = pd.DataFrame(columns=["lat", "lon", "pr", "color"])
+
+            layer_bg = pdk.Layer(
+                "ScatterplotLayer",
+                data=bg_map,
+                get_position="[lon, lat]",
+                get_fill_color="color",
+                get_radius=MAP_RADIUS_BG_M,
+                radius_units="meters",
+                pickable=False,
+            )
+            layer_fg = pdk.Layer(
+                "ScatterplotLayer",
+                data=fil_map,
+                get_position="[lon, lat]",
+                get_fill_color="color",
+                get_radius=MAP_RADIUS_FG_M,
+                radius_units="meters",
+                pickable=True,
+            )
+
+            deck = pdk.Deck(
+                layers=[layer_bg, layer_fg],
+                initial_view_state=view,
+                tooltip={"text": "BSP_polarRatio: {pr}\nlat: {lat}\nlon: {lon}"},
+            )
+            st.pydeck_chart(deck, width="stretch")
+
+    with cbar_col:
+        # Colorbar de l'échelle 70..130
+        fig_cb, ax_cb = plt.subplots(figsize=(1.0, 3.2))
+        cmap = plt.get_cmap()
+        norm = mpl.colors.Normalize(vmin=MAP_PR_MIN, vmax=MAP_PR_MAX)
+        fig_cb.colorbar(
+            mpl.cm.ScalarMappable(norm=norm, cmap=cmap),
+            cax=ax_cb,
+            label="BSP_polarRatio",
+        )
+        fig_cb.tight_layout()
+        st.pyplot(fig_cb)
+        plt.close(fig_cb)
+
+# --------------------
 # Choix X / Y / Color (après bin)
 # --------------------
-# Note: Heel remplacé par abs(Heel)
 CHANNELS = {
     "Trim": "SilverData.AHRS_Trim",
     "abs(Heel)": "abs_heel",
@@ -202,7 +304,11 @@ CHANNELS = {
     "TWA": "SilverData.WIND_TWA",
     "abs(TWA)": "abs_twa",
     "BSP_polarRatio": "SilverData.PERF_BSP_PolarRatio",
+    "AWA": "SilverData.WIND_AWA",
+    "AWS": "SilverData.WIND_AWS",
+    "VMG": "SilverData.PERF_VMG",
 }
+
 
 if bin_mode == "TWS":
     bin_key = "TWS"
@@ -235,10 +341,8 @@ if not bins_non_empty:
     st.warning("Aucun bin non-vide avec les filtres actuels.")
     st.stop()
 
-# Options X/Y/Color: enlever le channel utilisé pour bin
 options = [k for k in CHANNELS.keys() if k != bin_key]
 
-# Defaults : X=abs(TWA), Y=abs(Heel), Color=BSP_polarRatio (si possible)
 default_x = "abs(TWA)" if "abs(TWA)" in options else options[0]
 default_y = "abs(Heel)" if "abs(Heel)" in options else options[0]
 default_c = "BSP_polarRatio" if "BSP_polarRatio" in options else options[0]
@@ -247,17 +351,17 @@ st.subheader("Scatter plot")
 
 colXYC1, colXYC2, colXYC3 = st.columns(3)
 with colXYC1:
-    x_key = st.selectbox("X", options=options, index=options.index(default_x), key="custom_x_v3")
+    x_key = st.selectbox("X", options=options, index=options.index(default_x), key="custom_x_v5")
 with colXYC2:
-    y_key = st.selectbox("Y", options=options, index=options.index(default_y), key="custom_y_v3")
+    y_key = st.selectbox("Y", options=options, index=options.index(default_y), key="custom_y_v5")
 with colXYC3:
-    c_key = st.selectbox("Color", options=options, index=options.index(default_c), key="custom_c_v3")
+    c_key = st.selectbox("Color", options=options, index=options.index(default_c), key="custom_c_v5")
 
 x_col = CHANNELS[x_key]
 y_col = CHANNELS[y_key]
 c_col = CHANNELS[c_key]
 
-# Échelle couleur globale (pour comparer entre bins)
+# couleur globale (pour les scatters)
 c_min = float(df_f[c_col].min())
 c_max = float(df_f[c_col].max())
 norm = mpl.colors.Normalize(vmin=c_min, vmax=c_max)
@@ -265,11 +369,8 @@ cmap = plt.get_cmap()
 
 st.caption(f"Binning: **{bin_mode}** — X: **{x_key}** — Y: **{y_key}** — Color: **{c_key}**")
 
-# --------------------
-# Plots (2 par ligne) + 1 colorbar par ligne
-# --------------------
 for i in range(0, len(bins_non_empty), 2):
-    row_bins = bins_non_empty[i:i+2]
+    row_bins = bins_non_empty[i:i + 2]
     c1, c2, ccb = st.columns([1, 1, 0.18])
     cols = [c1, c2]
     have_any = False
@@ -298,7 +399,6 @@ for i in range(0, len(bins_non_empty), 2):
         plt.close(fig)
         have_any = True
 
-    # Colorbar unique par ligne (si au moins un plot)
     if have_any:
         fig_cb, ax_cb = plt.subplots(figsize=(1.0, 2.6))
         fig_cb.colorbar(
