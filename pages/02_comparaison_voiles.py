@@ -9,11 +9,9 @@ from lib.db_client import fetch_aggregated
 st.set_page_config(page_title="Comparaison voiles", layout="wide")
 st.title("Comparaison voiles")
 
-# --------------------
-# Style helpers
-# --------------------
 SCATTER_S = 2
 SCATTER_ALPHA = 0.4
+PLOT3_ALPHA = 0.85
 
 def h_color(text: str, color: str, level: int = 3):
     st.markdown(
@@ -42,56 +40,60 @@ def ensure_nav_days() -> list[pd.Timestamp]:
     nav_days = st.session_state.get("nav_days", [])
     return sorted(nav_days, reverse=True)
 
-def unique_sorted(series: pd.Series) -> list:
-    s = series.dropna()
-    if s.empty:
+def clean_sail(x) -> str | None:
+    """
+    Normalise les sailcodes:
+    - None/NaN/"" -> None
+    - "none" (toutes casses) -> None
+    - chaînes qui commencent par "nan" ou "none" -> None (ex: 'NaN2025_b')
+    """
+    if x is None:
+        return None
+    if isinstance(x, float) and np.isnan(x):
+        return None
+    s = str(x).strip()
+    if not s:
+        return None
+    s_low = s.lower()
+    if s_low == "none":
+        return None
+    if s_low.startswith("nan") or s_low.startswith("none"):
+        return None
+    return s
+
+def unique_sorted_clean(series: pd.Series) -> list[str]:
+    if series is None or len(series) == 0:
         return []
-    return sorted(list(pd.unique(s)))
+    vals = []
+    for v in pd.unique(series.dropna()):
+        vv = clean_sail(v)
+        if vv is not None:
+            vals.append(vv)
+    return sorted(list(dict.fromkeys(vals)))
 
-# --------------------
-# SailOnDeck mapping
-# --------------------
-SAIL_ON_DECK_MAP = {
-    1: "J1",
-    2: "J2",
-    3: "J3",
-    4: "J4",
-    5: "A1",
-    6: "A5",
-    7: "GNK",
-    8: "A2",
-    9: "A4",
-    10: "FJT",
-}
-
-# 10 markers distincts (tous "fillables")
-MARKERS = ['o', 's', '^', 'v', 'D', 'P', 'X', '<', '>', '*']
-CODE_TO_MARKER = {code: MARKERS[i] for i, code in enumerate(sorted(SAIL_ON_DECK_MAP.keys()))}
-
-def sail_name(code) -> str:
-    try:
-        c = int(code)
-    except Exception:
-        return str(code)
-    return SAIL_ON_DECK_MAP.get(c, str(c))
-
-# --------------------
-# Champs à charger (10s)
-# --------------------
 FIELDS_MEAN = [
     "SilverData.WIND_TWA",
     "SilverData.BSP_BoatSpeed",
     "SilverData.WIND_TWS",
     "SilverData.PERF_BSP_PolarRatio",
 ]
+
 FIELDS_LAST = [
     "SilverData.PERF_MainSail",
-    "SilverData.PERF_UpwashTableSelected",
-    "SilverData.PERF_SailOnDeck",
+    "SilverData.PERF_StaySail",
+    "SilverData.PERF_Jib",
+    "SilverData.PERF_HeadSail",
 ]
 
+POS_COLS = {
+    "Main": "SilverData.PERF_MainSail",
+    "Stay": "SilverData.PERF_StaySail",
+    "Jib":  "SilverData.PERF_Jib",
+    "Head": "SilverData.PERF_HeadSail",
+}
+
 # --------------------
-# UI : sélection des journées A / B
+# Sélection jours A/B
 # --------------------
 nav_days = ensure_nav_days()
 if not nav_days:
@@ -105,29 +107,16 @@ h_color("Sélection des journées", "#FFD54A", level=3)
 st.markdown("**1: sélectionner journées, 2: appliquer filtres communs, 3: appliquer filtres voiles (A/B)**")
 st.markdown("**data lissées sur 10 secondes**")
 
-# Defaults : A = dernier jour navigué, B = jour précédent si dispo sinon le même
 default_A = [nav_labels[0]] if nav_labels else []
 default_B = [nav_labels[1]] if len(nav_labels) > 1 else default_A
 
 colA, colB = st.columns(2)
-
 with colA:
     h_color("Data set A", "#2F6FED", level=3)
-    daysA_labels = st.multiselect(
-        "Journées (A) — coche au moins 1",
-        options=nav_labels,
-        default=default_A,
-        key="sails_daysA",
-    )
-
+    daysA_labels = st.multiselect("Journées (A) — coche au moins 1", nav_labels, default=default_A, key="sails_daysA")
 with colB:
     h_color("Data set B", "#E53935", level=3)
-    daysB_labels = st.multiselect(
-        "Journées (B) — coche au moins 1",
-        options=nav_labels,
-        default=default_B,
-        key="sails_daysB",
-    )
+    daysB_labels = st.multiselect("Journées (B) — coche au moins 1", nav_labels, default=default_B, key="sails_daysB")
 
 load_clicked = st.button("Sélectionner journées", type="primary")
 
@@ -145,6 +134,10 @@ def load_days_10s(selected_labels: list[str]) -> pd.DataFrame:
         )
         if not df.empty:
             df["day_utc"] = day.floor("D")
+            # nettoyage sailcodes dès le chargement
+            for c in POS_COLS.values():
+                if c in df.columns:
+                    df[c] = df[c].apply(lambda x: clean_sail(x) if clean_sail(x) is not None else "none")
             dfs.append(df)
     if not dfs:
         return pd.DataFrame()
@@ -157,43 +150,34 @@ if load_clicked:
         with st.spinner("Chargement des données (moyenne 10s)…"):
             st.session_state["sails_dfA_raw"] = load_days_10s(daysA_labels)
             st.session_state["sails_dfB_raw"] = load_days_10s(daysB_labels)
-
         for k in ["sails_dfA_common", "sails_dfB_common", "sails_dfA_final", "sails_dfB_final"]:
             st.session_state.pop(k, None)
-
         st.success("Données chargées.")
 
 dfA_raw = st.session_state.get("sails_dfA_raw", pd.DataFrame())
 dfB_raw = st.session_state.get("sails_dfB_raw", pd.DataFrame())
 
 # --------------------
-# Niveau 1 : Filtres communs
+# Filtres communs
 # --------------------
 h_color("Filtres communs", "#FFD54A", level=3)
-
-colF1, colF2, colF3, colF4 = st.columns(4)
-with colF1:
-    twa_min, twa_max = st.slider("abs(TWA) — degrés", 0, 180, (0, 180), step=1, key="sails_twa_range")
-with colF2:
-    bsp_min, bsp_max = st.slider("BSP — nds", 0, 30, (0, 30), step=1, key="sails_bsp_range")
-with colF3:
-    tws_min, tws_max = st.slider("TWS — nds", 0, 40, (0, 40), step=1, key="sails_tws_range")
-with colF4:
-    pr_min, pr_max = st.slider("BSP_polarRatio", 0, 160, (70, 130), step=1, key="sails_pr_range")
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    twa_min, twa_max = st.slider("abs(TWA) — degrés", 0, 180, (0, 180), 1, key="sails_twa_range")
+with c2:
+    bsp_min, bsp_max = st.slider("BSP — nds", 0, 30, (0, 30), 1, key="sails_bsp_range")
+with c3:
+    tws_min, tws_max = st.slider("TWS — nds", 0, 40, (0, 40), 1, key="sails_tws_range")
+with c4:
+    pr_min, pr_max = st.slider("BSP_polarRatio", 0, 160, (70, 130), 1, key="sails_pr_range")
 
 apply_common = st.button("Appliquer filtres communs")
 
 def apply_common_filters(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
-
-    needed = set(FIELDS_MEAN + FIELDS_LAST + ["time_utc"])
-    if not needed.issubset(df.columns):
-        return pd.DataFrame()
-
     out = df.dropna(subset=["time_utc"] + FIELDS_MEAN).copy()
     out["abs_twa"] = out["SilverData.WIND_TWA"].abs()
-
     out = out[
         (out["abs_twa"] >= twa_min) & (out["abs_twa"] <= twa_max) &
         (out["SilverData.BSP_BoatSpeed"] >= bsp_min) & (out["SilverData.BSP_BoatSpeed"] <= bsp_max) &
@@ -212,72 +196,68 @@ dfA_common = st.session_state.get("sails_dfA_common", pd.DataFrame())
 dfB_common = st.session_state.get("sails_dfB_common", pd.DataFrame())
 
 # --------------------
-# Niveau 2 : Choix combinaison de voiles (A et B séparés)
+# Filtres voiles utilisées (4 positions) A/B
 # --------------------
-h_color("Choix combinaison de voiles", "#FFD54A", level=3)
+h_color("Choix voiles utilisées", "#FFD54A", level=3)
 
-mainA_vals = unique_sorted(dfA_common.get("SilverData.PERF_MainSail", pd.Series(dtype="object"))) if not dfA_common.empty else []
-uwtA_vals  = unique_sorted(dfA_common.get("SilverData.PERF_UpwashTableSelected", pd.Series(dtype="object"))) if not dfA_common.empty else []
-sodA_codes = unique_sorted(dfA_common.get("SilverData.PERF_SailOnDeck", pd.Series(dtype="float"))) if not dfA_common.empty else []
-sodA_codes = [int(x) for x in sodA_codes if pd.notna(x)]
-sodA_names = [sail_name(c) for c in sodA_codes]
-name_to_code_A = {sail_name(c): c for c in sodA_codes}
-
-mainB_vals = unique_sorted(dfB_common.get("SilverData.PERF_MainSail", pd.Series(dtype="object"))) if not dfB_common.empty else []
-uwtB_vals  = unique_sorted(dfB_common.get("SilverData.PERF_UpwashTableSelected", pd.Series(dtype="object"))) if not dfB_common.empty else []
-sodB_codes = unique_sorted(dfB_common.get("SilverData.PERF_SailOnDeck", pd.Series(dtype="float"))) if not dfB_common.empty else []
-sodB_codes = [int(x) for x in sodB_codes if pd.notna(x)]
-sodB_names = [sail_name(c) for c in sodB_codes]
-name_to_code_B = {sail_name(c): c for c in sodB_codes}
+def build_options(df: pd.DataFrame, col: str) -> list[str]:
+    if df.empty or col not in df.columns:
+        return ["All"]
+    # on veut proposer "none" explicitement
+    vals = sorted(list(dict.fromkeys([str(x).strip() for x in df[col].dropna().tolist() if str(x).strip()])))
+    return ["All"] + vals
 
 colSA, colSB = st.columns(2)
 
 with colSA:
     h_color("Data set A", "#2F6FED", level=4)
-    mainA_sel = st.multiselect("GV — mainSail (A)", options=mainA_vals, default=mainA_vals, key="sails_mainA_sel")
-    uwtA_sel  = st.multiselect("sail_code_UWT (A)", options=uwtA_vals, default=uwtA_vals, key="sails_uwtA_sel")
-    sodA_sel_names = st.multiselect("SailOnDeck (A)", options=sodA_names, default=sodA_names, key="sails_sodA_sel")
+    mainA_sel = st.multiselect("Main (A)", options=build_options(dfA_common, POS_COLS["Main"]), default=["All"], key="mainA_sel")
+    stayA_sel = st.multiselect("StaySail (A)", options=build_options(dfA_common, POS_COLS["Stay"]), default=["All"], key="stayA_sel")
+    jibA_sel  = st.multiselect("Jib (A)", options=build_options(dfA_common, POS_COLS["Jib"]), default=["All"], key="jibA_sel")
+    headA_sel = st.multiselect("HeadSail (A)", options=build_options(dfA_common, POS_COLS["Head"]), default=["All"], key="headA_sel")
 
 with colSB:
     h_color("Data set B", "#E53935", level=4)
-    mainB_sel = st.multiselect("GV — mainSail (B)", options=mainB_vals, default=mainB_vals, key="sails_mainB_sel")
-    uwtB_sel  = st.multiselect("sail_code_UWT (B)", options=uwtB_vals, default=uwtB_vals, key="sails_uwtB_sel")
-    sodB_sel_names = st.multiselect("SailOnDeck (B)", options=sodB_names, default=sodB_names, key="sails_sodB_sel")
+    mainB_sel = st.multiselect("Main (B)", options=build_options(dfB_common, POS_COLS["Main"]), default=["All"], key="mainB_sel")
+    stayB_sel = st.multiselect("StaySail (B)", options=build_options(dfB_common, POS_COLS["Stay"]), default=["All"], key="stayB_sel")
+    jibB_sel  = st.multiselect("Jib (B)", options=build_options(dfB_common, POS_COLS["Jib"]), default=["All"], key="jibB_sel")
+    headB_sel = st.multiselect("HeadSail (B)", options=build_options(dfB_common, POS_COLS["Head"]), default=["All"], key="headB_sel")
 
 apply_sails = st.button("Appliquer filtres voiles (A/B)")
 
-def apply_sail_filters(df: pd.DataFrame, main_sel: list, uwt_sel: list, sod_sel_names: list, name_to_code: dict) -> pd.DataFrame:
+def apply_sail_filters_positions(df: pd.DataFrame, sels: dict) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
-
-    if main_sel is not None:
-        if len(main_sel) == 0:
+    for col, sel in sels.items():
+        if sel is None or len(sel) == 0:
             return out.iloc[0:0]
-        out = out[out["SilverData.PERF_MainSail"].isin(main_sel)]
-
-    if uwt_sel is not None:
-        if len(uwt_sel) == 0:
-            return out.iloc[0:0]
-        out = out[out["SilverData.PERF_UpwashTableSelected"].isin(uwt_sel)]
-
-    if sod_sel_names is not None:
-        if len(sod_sel_names) == 0:
-            return out.iloc[0:0]
-        sod_codes = [name_to_code[n] for n in sod_sel_names if n in name_to_code]
-        out = out[out["SilverData.PERF_SailOnDeck"].fillna(-999).astype(int).isin(sod_codes)]
-
+        if "All" in sel:
+            continue
+        out = out[out[col].isin(sel)]
     return out
 
 if apply_sails:
-    st.session_state["sails_dfA_final"] = apply_sail_filters(dfA_common, mainA_sel, uwtA_sel, sodA_sel_names, name_to_code_A)
-    st.session_state["sails_dfB_final"] = apply_sail_filters(dfB_common, mainB_sel, uwtB_sel, sodB_sel_names, name_to_code_B)
+    selsA = {
+        POS_COLS["Main"]: mainA_sel,
+        POS_COLS["Stay"]: stayA_sel,
+        POS_COLS["Jib"]:  jibA_sel,
+        POS_COLS["Head"]: headA_sel,
+    }
+    selsB = {
+        POS_COLS["Main"]: mainB_sel,
+        POS_COLS["Stay"]: stayB_sel,
+        POS_COLS["Jib"]:  jibB_sel,
+        POS_COLS["Head"]: headB_sel,
+    }
+    st.session_state["sails_dfA_final"] = apply_sail_filters_positions(dfA_common, selsA)
+    st.session_state["sails_dfB_final"] = apply_sail_filters_positions(dfB_common, selsB)
 
 dfA = st.session_state.get("sails_dfA_final", dfA_common)
 dfB = st.session_state.get("sails_dfB_final", dfB_common)
 
 # --------------------
-# Résultats + graphes
+# Résultats
 # --------------------
 h_color("Résultats", "#FFD54A", level=3)
 m1, m2, m3, m4 = st.columns(4)
@@ -290,15 +270,15 @@ if dfA.empty and dfB.empty:
     st.info("1) Sélectionner journées, 2) appliquer filtres communs, 3) appliquer filtres voiles (A/B).")
     st.stop()
 
-# ---- Plot 1
+# --------------------
+# Plot 1
+# --------------------
 h_color("BSP_polarRatio vs TWS", "#FFD54A", level=3)
-fig1 = plt.figure()
+fig1 = plt.figure(figsize=(8, 4.5))
 if not dfA.empty:
-    plt.scatter(dfA["SilverData.WIND_TWS"], dfA["SilverData.PERF_BSP_PolarRatio"],
-                s=SCATTER_S, c="blue", alpha=SCATTER_ALPHA, label="Data set A")
+    plt.scatter(dfA["SilverData.WIND_TWS"], dfA["SilverData.PERF_BSP_PolarRatio"], s=SCATTER_S, c="blue", alpha=SCATTER_ALPHA, label="Data set A")
 if not dfB.empty:
-    plt.scatter(dfB["SilverData.WIND_TWS"], dfB["SilverData.PERF_BSP_PolarRatio"],
-                s=SCATTER_S, c="red", alpha=SCATTER_ALPHA, label="Data set B")
+    plt.scatter(dfB["SilverData.WIND_TWS"], dfB["SilverData.PERF_BSP_PolarRatio"], s=SCATTER_S, c="red", alpha=SCATTER_ALPHA, label="Data set B")
 plt.xlabel("TWS (nds)")
 plt.ylabel("BSP_polarRatio")
 plt.title("Daguet 5 — BSP_polarRatio vs TWS")
@@ -307,7 +287,9 @@ plt.tight_layout()
 st.pyplot(fig1)
 plt.close(fig1)
 
-# ---- Plot 2 + Plot 3 helpers
+# --------------------
+# Helpers polaires
+# --------------------
 def polar_base(ax, outer):
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
@@ -336,7 +318,21 @@ def polar_base(ax, outer):
     ax.set_yticks(yticks)
     ax.set_rlabel_position(0)
 
-# Compute outer
+def sail_combo_tuple(row: pd.Series) -> tuple[str, str, str, str]:
+    def v(col):
+        s = row.get(col, "none")
+        s2 = str(s).strip().lower()
+        if s2.startswith("nan") or s2.startswith("none") or s2 == "" or s2 == "none":
+            return "none"
+        return str(s).strip()
+    return (
+        v(POS_COLS["Main"]),
+        v(POS_COLS["Stay"]),
+        v(POS_COLS["Jib"]),
+        v(POS_COLS["Head"]),
+    )
+
+# outer radius
 bspA = dfA["SilverData.BSP_BoatSpeed"].to_numpy() if not dfA.empty else np.array([])
 bspB = dfB["SilverData.BSP_BoatSpeed"].to_numpy() if not dfB.empty else np.array([])
 max_bsp = 0.0
@@ -344,14 +340,16 @@ if bspA.size: max_bsp = max(max_bsp, float(np.nanmax(bspA)))
 if bspB.size: max_bsp = max(max_bsp, float(np.nanmax(bspB)))
 outer = int(max_bsp) + 1 if max_bsp > 0 else 1
 
-# ---- Plot 2 (simple)
+# --------------------
+# Plot 2
+# --------------------
 h_color("BSP vs TWA (polaire)", "#FFD54A", level=3)
 twaA = dfA["SilverData.WIND_TWA"].to_numpy() if not dfA.empty else np.array([])
 twaB = dfB["SilverData.WIND_TWA"].to_numpy() if not dfB.empty else np.array([])
 thetaA = np.deg2rad((twaA + 360.0) % 360.0) if twaA.size else np.array([])
 thetaB = np.deg2rad((twaB + 360.0) % 360.0) if twaB.size else np.array([])
 
-fig2 = plt.figure()
+fig2 = plt.figure(figsize=(7.5, 7.5))
 ax2 = fig2.add_subplot(111, projection="polar")
 polar_base(ax2, outer)
 if thetaA.size:
@@ -359,32 +357,90 @@ if thetaA.size:
 if thetaB.size:
     ax2.scatter(thetaB, bspB, s=SCATTER_S, c="red", alpha=SCATTER_ALPHA, label="Data set B")
 ax2.set_title("BSP (rayon) vs TWA (angle)", pad=15)
-ax2.legend(loc="upper right", bbox_to_anchor=(1.2, 1.1))
+ax2.legend(loc="upper right", bbox_to_anchor=(1.20, 1.10))
 plt.tight_layout()
 st.pyplot(fig2)
 plt.close(fig2)
 
-# ---- Plot 3 (marker = SailOnDeck)
-h_color("BSP vs TWA (polaire) — marker = SailOnDeck", "#FFD54A", level=3)
-fig3 = plt.figure()
+# --------------------
+# Plot 3 : couleurs = combos + tableau coloré
+# --------------------
+h_color("BSP vs TWA (polaire) — couleur = combinaison voiles utilisées", "#FFD54A", level=3)
+
+def add_combo_tuple(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    out["combo_tuple"] = out.apply(sail_combo_tuple, axis=1)
+    return out
+
+dfA3 = add_combo_tuple(dfA)
+dfB3 = add_combo_tuple(dfB)
+
+mapping_global = {}
+seen = set()
+
+def add_tuple_to_mapping(tup):
+    if tup in seen:
+        return
+    seen.add(tup)
+    mapping_global[f"combo{len(mapping_global) + 1}"] = tup
+
+if not dfA3.empty:
+    for t in dfA3["combo_tuple"].tolist():
+        add_tuple_to_mapping(t)
+
+if not dfB3.empty:
+    for t in dfB3["combo_tuple"].tolist():
+        add_tuple_to_mapping(t)
+
+inv_global = {t: k for k, t in mapping_global.items()}
+
+if not dfA3.empty:
+    dfA3["combo_id"] = dfA3["combo_tuple"].apply(lambda t: inv_global.get(t))
+if not dfB3.empty:
+    dfB3["combo_id"] = dfB3["combo_tuple"].apply(lambda t: inv_global.get(t))
+
+combo_ids_present = []
+if not dfA3.empty:
+    combo_ids_present += dfA3["combo_id"].dropna().unique().tolist()
+if not dfB3.empty:
+    combo_ids_present += dfB3["combo_id"].dropna().unique().tolist()
+combo_ids_present = sorted(list(dict.fromkeys(combo_ids_present)))
+
+# Palette qualitative plus contrastée que tab20 seule
+def build_combo_palette(n: int):
+    cmaps = [plt.get_cmap("tab20"), plt.get_cmap("tab20b"), plt.get_cmap("tab20c")]
+    colors = []
+    for cm in cmaps:
+        colors.extend([cm(i) for i in range(cm.N)])
+    # on coupe/étend à n
+    if n <= len(colors):
+        return colors[:n]
+    # si beaucoup de combos, on répète (rare)
+    rep = int(np.ceil(n / len(colors)))
+    colors = (colors * rep)[:n]
+    return colors
+
+palette = build_combo_palette(len(combo_ids_present))
+combo_to_color = {cid: palette[i] for i, cid in enumerate(combo_ids_present)}
+
+
+fig3 = plt.figure(figsize=(8.5, 8.5))
 ax3 = fig3.add_subplot(111, projection="polar")
 polar_base(ax3, outer)
 
-def plot_by_sail(df, color):
+def scatter_by_combo(df: pd.DataFrame, marker: str):
     if df.empty:
-        return []
-    codes = df["SilverData.PERF_SailOnDeck"].dropna().astype(int).unique().tolist()
-    used = []
-    for code in sorted(codes):
-        sub = df[df["SilverData.PERF_SailOnDeck"].fillna(-999).astype(int) == int(code)]
-        if sub.empty:
+        return
+    for cid, sub in df.groupby("combo_id"):
+        if cid not in combo_to_color:
             continue
+        color = combo_to_color[cid]
         twa = sub["SilverData.WIND_TWA"].to_numpy()
         bsp = sub["SilverData.BSP_BoatSpeed"].to_numpy()
         th = np.deg2rad((twa + 360.0) % 360.0)
-        marker = CODE_TO_MARKER.get(int(code), "o")
 
-        # Points pleins
         ax3.scatter(
             th, bsp,
             s=12,
@@ -392,71 +448,46 @@ def plot_by_sail(df, color):
             facecolors=color,
             edgecolors="black",
             linewidths=0.2,
-            alpha=SCATTER_ALPHA,
+            alpha=PLOT3_ALPHA,
         )
-        used.append(int(code))
-    return used
 
-usedA = plot_by_sail(dfA, "blue")
-usedB = plot_by_sail(dfB, "red")
-used_codes = sorted(set(usedA) | set(usedB))
+scatter_by_combo(dfA3, marker="o")
+scatter_by_combo(dfB3, marker="^")
 
-# Légendes compactes
+ax3.set_title("Couleur = combo ; A=o ; B=^", pad=15)
 legend_dataset = [
-    Line2D([0], [0], marker='o', color='w', label='Data set A', markerfacecolor='blue', markeredgecolor='blue', markersize=5),
-    Line2D([0], [0], marker='o', color='w', label='Data set B', markerfacecolor='red', markeredgecolor='red', markersize=5),
+    Line2D([0], [0], marker='o', color='black', label='Data set A', linestyle='None', markersize=6),
+    Line2D([0], [0], marker='^', color='black', label='Data set B', linestyle='None', markersize=6),
 ]
-legend_sails = [
-    Line2D([0], [0], marker=CODE_TO_MARKER.get(code, 'o'), color='black',
-           label=SAIL_ON_DECK_MAP.get(code, str(code)), linestyle='None', markersize=5)
-    for code in used_codes
-]
-
-ax3.set_title("Couleur = dataset, forme = SailOnDeck", pad=15)
-leg1 = ax3.legend(handles=legend_dataset, loc="upper right", bbox_to_anchor=(1.22, 1.10), fontsize=8)
-ax3.add_artist(leg1)
-
-# Légende voiles : petite, en 2 colonnes, placée plus à l’extérieur
-if legend_sails:
-    ax3.legend(handles=legend_sails, loc="lower right", bbox_to_anchor=(1.32, -0.10), ncol=2, fontsize=8)
+ax3.legend(handles=legend_dataset, loc="upper right", bbox_to_anchor=(1.20, 1.10), fontsize=8)
 
 plt.tight_layout()
 st.pyplot(fig3)
 plt.close(fig3)
 
-with st.expander("Aperçu données filtrées (A/B)", expanded=False):
-    h_color("Data set A (filtré)", "#2F6FED", level=4)
-    if not dfA.empty:
-        showA = dfA.copy()
-        showA["SailOnDeck"] = showA["SilverData.PERF_SailOnDeck"].apply(sail_name)
-        st.dataframe(
-            showA[[
-                "time_utc",
-                "SilverData.WIND_TWS",
-                "SilverData.PERF_BSP_PolarRatio",
-                "SilverData.BSP_BoatSpeed",
-                "SilverData.WIND_TWA",
-                "SilverData.PERF_MainSail",
-                "SilverData.PERF_UpwashTableSelected",
-                "SailOnDeck",
-            ]].head(200),
-            width="stretch",
-        )
+rows = []
+for cid in combo_ids_present:
+    tup = mapping_global.get(cid)
+    if tup is None:
+        continue
+    main, stay, jib, head = tup
+    rows.append({"combo": cid, "MainSail": main, "StaySail": stay, "Jib": jib, "HeadSail": head})
 
-    h_color("Data set B (filtré)", "#E53935", level=4)
-    if not dfB.empty:
-        showB = dfB.copy()
-        showB["SailOnDeck"] = showB["SilverData.PERF_SailOnDeck"].apply(sail_name)
-        st.dataframe(
-            showB[[
-                "time_utc",
-                "SilverData.WIND_TWS",
-                "SilverData.PERF_BSP_PolarRatio",
-                "SilverData.BSP_BoatSpeed",
-                "SilverData.WIND_TWA",
-                "SilverData.PERF_MainSail",
-                "SilverData.PERF_UpwashTableSelected",
-                "SailOnDeck",
-            ]].head(200),
-            width="stretch",
-        )
+df_combo = pd.DataFrame(rows)
+if df_combo.empty:
+    st.info("Aucune combinaison détectée dans les données filtrées.")
+else:
+    df_combo = df_combo.sort_values("combo").reset_index(drop=True)
+
+    def rgba_to_css(rgba):
+        r, g, b, a = rgba
+        return f"rgba({int(r*255)}, {int(g*255)}, {int(b*255)}, {a})"
+
+    combo_to_css = {cid: rgba_to_css(combo_to_color[cid]) for cid in combo_ids_present}
+
+    def style_rows(row):
+        cid = row["combo"]
+        css = combo_to_css.get(cid, "rgba(255,255,255,0)")
+        return [f"background-color: {css}; color: black;"] * len(row)
+
+    st.dataframe(df_combo.style.apply(style_rows, axis=1), width="stretch", hide_index=True)

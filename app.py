@@ -3,10 +3,19 @@ from pathlib import Path
 
 from lib.nav_days import get_nav_days
 
+
 st.set_page_config(
-    page_title="Daguet 5 – Data App",
+    page_title="Daguet 5 – Performance Data",
+    page_icon="assets/logo_daguet5.svg",
     layout="wide",
 )
+
+col1, col2 = st.columns([0.15, 0.85], vertical_alignment="center")
+with col1:
+    st.image("assets/logo_daguet5.svg", width=80)
+with col2:
+    st.markdown("## Daguet 5 — Performance Data")
+
 
 # =========================
 # Initialisation globale
