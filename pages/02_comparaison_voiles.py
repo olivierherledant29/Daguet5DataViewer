@@ -61,16 +61,6 @@ def clean_sail(x) -> str | None:
         return None
     return s
 
-def unique_sorted_clean(series: pd.Series) -> list[str]:
-    if series is None or len(series) == 0:
-        return []
-    vals = []
-    for v in pd.unique(series.dropna()):
-        vv = clean_sail(v)
-        if vv is not None:
-            vals.append(vv)
-    return sorted(list(dict.fromkeys(vals)))
-
 FIELDS_MEAN = [
     "SilverData.WIND_TWA",
     "SilverData.BSP_BoatSpeed",
@@ -203,7 +193,6 @@ h_color("Choix voiles utilisées", "#FFD54A", level=3)
 def build_options(df: pd.DataFrame, col: str) -> list[str]:
     if df.empty or col not in df.columns:
         return ["All"]
-    # on veut proposer "none" explicitement
     vals = sorted(list(dict.fromkeys([str(x).strip() for x in df[col].dropna().tolist() if str(x).strip()])))
     return ["All"] + vals
 
@@ -290,7 +279,7 @@ plt.close(fig1)
 # --------------------
 # Helpers polaires
 # --------------------
-def polar_base(ax, outer):
+def polar_base_signed(ax, outer):
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
     ax.set_thetamin(0)
@@ -309,10 +298,39 @@ def polar_base(ax, outer):
         th = np.deg2rad(deg)
         ax.plot([th, th], [0, outer], color="black", linestyle="-", linewidth=0.35, alpha=0.6)
 
+    # ticks -180..180 sur cercle extérieur
     twa_tick_labels = list(range(-180, 181, 30))
     theta_ticks = [np.deg2rad((t + 360) % 360) for t in twa_tick_labels]
     ax.set_xticks(theta_ticks)
     ax.set_xticklabels([str(t) for t in twa_tick_labels])
+
+    yticks = list(range(0, outer + 1, 10))
+    ax.set_yticks(yticks)
+    ax.set_rlabel_position(0)
+
+def polar_base_abs(ax, outer):
+    """Polar pour abs(TWA): angles 0..180"""
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    ax.set_thetamin(0)
+    ax.set_thetamax(180)
+    ax.set_rlim(0, outer)
+    ax.grid(False)
+
+    lw_grid = 0.45
+    theta_grid = np.linspace(0, np.pi, 361)
+
+    for r in range(2, outer + 1, 2):
+        ls = "-" if (r % 10 == 0) else "--"
+        ax.plot(theta_grid, np.full_like(theta_grid, r), color="black", linestyle=ls, linewidth=lw_grid, alpha=0.9)
+
+    for deg in range(0, 181, 10):
+        th = np.deg2rad(deg)
+        ax.plot([th, th], [0, outer], color="black", linestyle="-", linewidth=0.35, alpha=0.6)
+
+    tick_labels = list(range(0, 181, 30))
+    ax.set_xticks([np.deg2rad(t) for t in tick_labels])
+    ax.set_xticklabels([str(t) for t in tick_labels])
 
     yticks = list(range(0, outer + 1, 10))
     ax.set_yticks(yticks)
@@ -341,7 +359,7 @@ if bspB.size: max_bsp = max(max_bsp, float(np.nanmax(bspB)))
 outer = int(max_bsp) + 1 if max_bsp > 0 else 1
 
 # --------------------
-# Plot 2
+# Plot 2 (signed)
 # --------------------
 h_color("BSP vs TWA (polaire)", "#FFD54A", level=3)
 twaA = dfA["SilverData.WIND_TWA"].to_numpy() if not dfA.empty else np.array([])
@@ -351,7 +369,7 @@ thetaB = np.deg2rad((twaB + 360.0) % 360.0) if twaB.size else np.array([])
 
 fig2 = plt.figure(figsize=(7.5, 7.5))
 ax2 = fig2.add_subplot(111, projection="polar")
-polar_base(ax2, outer)
+polar_base_signed(ax2, outer)
 if thetaA.size:
     ax2.scatter(thetaA, bspA, s=SCATTER_S, c="blue", alpha=SCATTER_ALPHA, label="Data set A")
 if thetaB.size:
@@ -363,7 +381,27 @@ st.pyplot(fig2)
 plt.close(fig2)
 
 # --------------------
-# Plot 3 : couleurs = combos + tableau coloré
+# Plot 2 bis (abs)
+# --------------------
+h_color("BSP vs abs(TWA) (polaire) — superposition tribord/bâbord", "#FFD54A", level=3)
+abs_thetaA = np.deg2rad(np.abs(twaA)) if twaA.size else np.array([])
+abs_thetaB = np.deg2rad(np.abs(twaB)) if twaB.size else np.array([])
+
+fig2b = plt.figure(figsize=(7.5, 7.5))
+ax2b = fig2b.add_subplot(111, projection="polar")
+polar_base_abs(ax2b, outer)
+if abs_thetaA.size:
+    ax2b.scatter(abs_thetaA, bspA, s=SCATTER_S, c="blue", alpha=SCATTER_ALPHA, label="Data set A")
+if abs_thetaB.size:
+    ax2b.scatter(abs_thetaB, bspB, s=SCATTER_S, c="red", alpha=SCATTER_ALPHA, label="Data set B")
+ax2b.set_title("BSP (rayon) vs abs(TWA) (angle)", pad=15)
+ax2b.legend(loc="upper right", bbox_to_anchor=(1.20, 1.10))
+plt.tight_layout()
+st.pyplot(fig2b)
+plt.close(fig2b)
+
+# --------------------
+# Plot 3 : couleurs = combos + tableau coloré (signed)
 # --------------------
 h_color("BSP vs TWA (polaire) — couleur = combinaison voiles utilisées", "#FFD54A", level=3)
 
@@ -389,7 +427,6 @@ def add_tuple_to_mapping(tup):
 if not dfA3.empty:
     for t in dfA3["combo_tuple"].tolist():
         add_tuple_to_mapping(t)
-
 if not dfB3.empty:
     for t in dfB3["combo_tuple"].tolist():
         add_tuple_to_mapping(t)
@@ -408,29 +445,24 @@ if not dfB3.empty:
     combo_ids_present += dfB3["combo_id"].dropna().unique().tolist()
 combo_ids_present = sorted(list(dict.fromkeys(combo_ids_present)))
 
-# Palette qualitative plus contrastée que tab20 seule
 def build_combo_palette(n: int):
     cmaps = [plt.get_cmap("tab20"), plt.get_cmap("tab20b"), plt.get_cmap("tab20c")]
     colors = []
     for cm in cmaps:
         colors.extend([cm(i) for i in range(cm.N)])
-    # on coupe/étend à n
     if n <= len(colors):
         return colors[:n]
-    # si beaucoup de combos, on répète (rare)
     rep = int(np.ceil(n / len(colors)))
-    colors = (colors * rep)[:n]
-    return colors
+    return (colors * rep)[:n]
 
 palette = build_combo_palette(len(combo_ids_present))
 combo_to_color = {cid: palette[i] for i, cid in enumerate(combo_ids_present)}
 
-
 fig3 = plt.figure(figsize=(8.5, 8.5))
 ax3 = fig3.add_subplot(111, projection="polar")
-polar_base(ax3, outer)
+polar_base_signed(ax3, outer)
 
-def scatter_by_combo(df: pd.DataFrame, marker: str):
+def scatter_by_combo_signed(df: pd.DataFrame, marker: str):
     if df.empty:
         return
     for cid, sub in df.groupby("combo_id"):
@@ -440,7 +472,6 @@ def scatter_by_combo(df: pd.DataFrame, marker: str):
         twa = sub["SilverData.WIND_TWA"].to_numpy()
         bsp = sub["SilverData.BSP_BoatSpeed"].to_numpy()
         th = np.deg2rad((twa + 360.0) % 360.0)
-
         ax3.scatter(
             th, bsp,
             s=12,
@@ -451,8 +482,8 @@ def scatter_by_combo(df: pd.DataFrame, marker: str):
             alpha=PLOT3_ALPHA,
         )
 
-scatter_by_combo(dfA3, marker="o")
-scatter_by_combo(dfB3, marker="^")
+scatter_by_combo_signed(dfA3, marker="o")
+scatter_by_combo_signed(dfB3, marker="^")
 
 ax3.set_title("Couleur = combo ; A=o ; B=^", pad=15)
 legend_dataset = [
@@ -465,6 +496,7 @@ plt.tight_layout()
 st.pyplot(fig3)
 plt.close(fig3)
 
+# tableau combos (signed)
 rows = []
 for cid in combo_ids_present:
     tup = mapping_global.get(cid)
@@ -472,17 +504,14 @@ for cid in combo_ids_present:
         continue
     main, stay, jib, head = tup
     rows.append({"combo": cid, "MainSail": main, "StaySail": stay, "Jib": jib, "HeadSail": head})
-
 df_combo = pd.DataFrame(rows)
-if df_combo.empty:
-    st.info("Aucune combinaison détectée dans les données filtrées.")
-else:
+
+def rgba_to_css(rgba):
+    r, g, b, a = rgba
+    return f"rgba({int(r*255)}, {int(g*255)}, {int(b*255)}, {a})"
+
+if not df_combo.empty:
     df_combo = df_combo.sort_values("combo").reset_index(drop=True)
-
-    def rgba_to_css(rgba):
-        r, g, b, a = rgba
-        return f"rgba({int(r*255)}, {int(g*255)}, {int(b*255)}, {a})"
-
     combo_to_css = {cid: rgba_to_css(combo_to_color[cid]) for cid in combo_ids_present}
 
     def style_rows(row):
@@ -491,3 +520,44 @@ else:
         return [f"background-color: {css}; color: black;"] * len(row)
 
     st.dataframe(df_combo.style.apply(style_rows, axis=1), width="stretch", hide_index=True)
+else:
+    st.info("Aucune combinaison détectée dans les données filtrées.")
+
+# --------------------
+# Plot 3 bis (abs) : même combos, mais angle = abs(TWA)
+# --------------------
+h_color("BSP vs abs(TWA) (polaire) — couleur = combinaison voiles utilisées", "#FFD54A", level=3)
+
+fig3b = plt.figure(figsize=(8.5, 8.5))
+ax3b = fig3b.add_subplot(111, projection="polar")
+polar_base_abs(ax3b, outer)
+
+def scatter_by_combo_abs(df: pd.DataFrame, marker: str):
+    if df.empty:
+        return
+    for cid, sub in df.groupby("combo_id"):
+        if cid not in combo_to_color:
+            continue
+        color = combo_to_color[cid]
+        twa = sub["SilverData.WIND_TWA"].to_numpy()
+        bsp = sub["SilverData.BSP_BoatSpeed"].to_numpy()
+        th = np.deg2rad(np.abs(twa))
+        ax3b.scatter(
+            th, bsp,
+            s=12,
+            marker=marker,
+            facecolors=color,
+            edgecolors="black",
+            linewidths=0.2,
+            alpha=PLOT3_ALPHA,
+        )
+
+scatter_by_combo_abs(dfA3, marker="o")
+scatter_by_combo_abs(dfB3, marker="^")
+
+ax3b.set_title("Couleur = combo ; A=o ; B=^ (angle = abs(TWA))", pad=15)
+ax3b.legend(handles=legend_dataset, loc="upper right", bbox_to_anchor=(1.20, 1.10), fontsize=8)
+
+plt.tight_layout()
+st.pyplot(fig3b)
+plt.close(fig3b)
