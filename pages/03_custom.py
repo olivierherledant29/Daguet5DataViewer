@@ -402,7 +402,8 @@ if apply_filters or ("custom_df_filtered_allchannels" not in st.session_state):
 
     uniq_combos = list(dict.fromkeys(df_raw["combo_tuple"].tolist()))
     combo_id_map = {t: i + 1 for i, t in enumerate(uniq_combos)}
-    df_raw["combo_id"] = df_raw["combo_tuple"].map(combo_id_map).astype(float)
+    
+    df_raw["combo_id"] = df_raw["combo_tuple"].apply(lambda t: combo_id_map.get(t)).astype(float)
 
     # filtres communs
     df_f = df_raw.dropna(subset=[
